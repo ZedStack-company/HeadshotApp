@@ -1,13 +1,28 @@
-// supabase/functions/manage_credits/index.js
-import { serve } from "http";
-import { createClient } from "@supabase/supabase-js";
+// supabase/functions/manage_credits/index.ts
+import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
+import { createClient, PostgrestError } from "https://esm.sh/@supabase/supabase-js@2";
 
+// --- Supabase client ---
 const supabase = createClient(
-  Deno.env.get("SUPABASE_URL"),
-  Deno.env.get("SUPABASE_ANON_KEY")
+  Deno.env.get("SUPABASE_URL") ?? "",
+  Deno.env.get("SUPABASE_ANON_KEY") ?? ""
 );
 
-function jsonResponse(data, status = 200) {
+// --- Types ---
+interface UserCredits {
+  user_id: string;
+  current_credits: number;
+  last_credit_award_time: string;
+  daily_credit_reset_time: string;
+}
+
+interface RequestBody {
+  user_id?: string;
+  amount?: number;
+}
+
+// --- JSON response helper ---
+function jsonResponse(data: unknown, status: number = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
     headers: { "Content-Type": "application/json" },
@@ -15,39 +30,41 @@ function jsonResponse(data, status = 200) {
 }
 
 // --- Helper: Ensure user row exists ---
-async function ensureUser(userId) {
+async function ensureUser(userId: string): Promise<UserCredits> {
   const { data, error } = await supabase
     .from("user_credits")
     .select("*")
     .eq("user_id", userId)
-    .single();
+    .single<UserCredits>();
 
-  if (error && error.code !== "PGRST116") throw error; // 116 = no rows
+  // If row not found, create one
+  if (error && (error as PostgrestError).code !== "PGRST116") throw error;
   if (!data) {
-    // create with default credits
+    const now = new Date().toISOString();
     const { data: newUser, error: insertError } = await supabase
       .from("user_credits")
       .insert({
         user_id: userId,
         current_credits: 4,
-        last_credit_award_time: new Date().toISOString(),
-        daily_credit_reset_time: new Date().toISOString(),
+        last_credit_award_time: now,
+        daily_credit_reset_time: now,
       })
       .select()
-      .single();
+      .single<UserCredits>();
 
     if (insertError) throw insertError;
-    return newUser;
+    return newUser as UserCredits;
   }
+
   return data;
 }
 
-// --- Helper: Recover credits (hourly + midnight reset) ---
-function recoverCredits(userRow) {
+// --- Helper: Recover credits ---
+function recoverCredits(userRow: UserCredits): UserCredits {
   let { current_credits, last_credit_award_time, daily_credit_reset_time } = userRow;
   const now = new Date();
 
-  // --- Reset at midnight (give 4 credits)
+  // --- Midnight reset (back to 4 credits) ---
   const lastReset = new Date(daily_credit_reset_time);
   const todayMidnight = new Date();
   todayMidnight.setHours(0, 0, 0, 0);
@@ -57,10 +74,11 @@ function recoverCredits(userRow) {
     daily_credit_reset_time = now.toISOString();
   }
 
-  // --- Add 1 credit/hour if < 8
+  // --- Add 1 credit/hour (up to 8) ---
   if (current_credits < 8) {
     const lastAward = new Date(last_credit_award_time);
-    const diffHours = Math.floor((now - lastAward) / (1000 * 60 * 60));
+    const diffHours = Math.floor((now.getTime() - lastAward.getTime()) / (1000 * 60 * 60));
+
     if (diffHours >= 1) {
       const creditsToAdd = Math.min(diffHours, 8 - current_credits);
       current_credits += creditsToAdd;
@@ -68,30 +86,27 @@ function recoverCredits(userRow) {
     }
   }
 
-  return { current_credits, last_credit_award_time, daily_credit_reset_time };
+  return { user_id: userRow.user_id, current_credits, last_credit_award_time, daily_credit_reset_time };
 }
 
 // --- Handlers ---
-async function handleGetCredits(userId) {
+async function handleGetCredits(userId: string): Promise<UserCredits> {
   let userRow = await ensureUser(userId);
-
-  // Recover before returning
   const recovered = recoverCredits(userRow);
 
-  // update db
   const { data, error } = await supabase
     .from("user_credits")
     .update(recovered)
     .eq("user_id", userId)
     .select()
-    .single();
+    .single<UserCredits>();
 
   if (error) throw error;
-  return data;
+  return data as UserCredits;
 }
 
-async function handleUseCredits(userId, amount = 2) {
-  let userRow = await handleGetCredits(userId); // auto-recover first
+async function handleUseCredits(userId: string, amount: number = 2): Promise<UserCredits> {
+  let userRow = await handleGetCredits(userId);
 
   if (userRow.current_credits < amount) {
     throw new Error(`Not enough credits. Need ${amount}, have ${userRow.current_credits}`);
@@ -102,13 +117,13 @@ async function handleUseCredits(userId, amount = 2) {
     .update({ current_credits: userRow.current_credits - amount })
     .eq("user_id", userId)
     .select()
-    .single();
+    .single<UserCredits>();
 
   if (error) throw error;
-  return data;
+  return data as UserCredits;
 }
 
-async function handleResetCredits(userId) {
+async function handleResetCredits(userId: string): Promise<UserCredits> {
   const resetData = {
     current_credits: 4,
     daily_credit_reset_time: new Date().toISOString(),
@@ -120,17 +135,17 @@ async function handleResetCredits(userId) {
     .update(resetData)
     .eq("user_id", userId)
     .select()
-    .single();
+    .single<UserCredits>();
 
   if (error) throw error;
-  return data;
+  return data as UserCredits;
 }
 
-// --- Main router ---
-serve(async (req) => {
+// --- Main Router ---
+serve(async (req: Request): Promise<Response> => {
   const { pathname } = new URL(req.url);
-  const body = req.method === "POST" ? await req.json().catch(() => ({})) : {};
-  const userId = body.user_id || req.headers.get("x-user-id"); // ✅ You decide auth strategy
+  const body: RequestBody = req.method === "POST" ? await req.json().catch(() => ({})) : {};
+  const userId = body.user_id || req.headers.get("x-user-id") || "";
 
   if (!userId) {
     return jsonResponse({ error: "Missing user_id" }, 400);
@@ -142,7 +157,7 @@ serve(async (req) => {
         return jsonResponse(await handleGetCredits(userId));
 
       case pathname === "/credits/use" && req.method === "POST":
-        return jsonResponse(await handleUseCredits(userId, body.amount || 2));
+        return jsonResponse(await handleUseCredits(userId, body.amount ?? 2));
 
       case pathname === "/credits/reset" && req.method === "POST":
         return jsonResponse(await handleResetCredits(userId));
@@ -150,7 +165,7 @@ serve(async (req) => {
       default:
         return jsonResponse({ error: "Not found" }, 404);
     }
-  } catch (err) {
+  } catch (err: any) {
     console.error("Credit error:", err.message);
     return jsonResponse({ error: err.message }, 400);
   }

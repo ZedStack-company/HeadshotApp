@@ -148,10 +148,10 @@ serve(async (req) => {
       const dynamicElements = `${cameraZoomMapping}, ${poseMapping}, ${lightingMapping}, ${outfitMapping}, ${backgroundMapping}, For the body: ${bodyTypeMapping}, ${ageMapping} ${genderMapping}.`
       finalPrompt = `${basePrompt} ${dynamicElements}`
     }
-
+console.log("Final Prompt:", finalPrompt)
     // --- Step 5: Call Replicate ---
     const output = await replicate.run("black-forest-labs/flux-kontext-pro", {
-      input: { input_image: image, prompt: finalPrompt, output_format: "jpg" }
+      input: { prompt: finalPrompt, image: image, output_type: "png" }
     })
 
     const imageUrl = Array.isArray(output) ? output[0] : output

@@ -1,0 +1,11 @@
+{
+  "name": "process-image",
+  "version": "0.1.0",
+  "description": "Process user-uploaded images with AI to generate professional headshots",
+  "env": [
+    "REPLICATE_API_TOKEN"
+  ],
+  "permissions": [
+    "storage:write"
+  ]
+}
