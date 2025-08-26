@@ -45,7 +45,7 @@ export default function SignUpScreen({ navigation }) {
         'We\'ve sent you a confirmation email. Please verify your email to continue.'
       );
       
-      navigation.navigate('Home');
+     
       
     } catch (error) {
       console.error('Full signup error:', {

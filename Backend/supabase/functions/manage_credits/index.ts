@@ -14,6 +14,7 @@ interface UserCredits {
   current_credits: number;
   last_credit_award_time: string;
   daily_credit_reset_time: string;
+  daily_recovered_credits: number; // NEW field
 }
 
 interface RequestBody {
@@ -37,8 +38,8 @@ async function ensureUser(userId: string): Promise<UserCredits> {
     .eq("user_id", userId)
     .single<UserCredits>();
 
-  // If row not found, create one
   if (error && (error as PostgrestError).code !== "PGRST116") throw error;
+
   if (!data) {
     const now = new Date().toISOString();
     const { data: newUser, error: insertError } = await supabase
@@ -48,6 +49,7 @@ async function ensureUser(userId: string): Promise<UserCredits> {
         current_credits: 4,
         last_credit_award_time: now,
         daily_credit_reset_time: now,
+        daily_recovered_credits: 0,
       })
       .select()
       .single<UserCredits>();
@@ -59,12 +61,18 @@ async function ensureUser(userId: string): Promise<UserCredits> {
   return data;
 }
 
-// --- Helper: Recover credits ---
+// --- Helper: Recover credits with cap ---
 function recoverCredits(userRow: UserCredits): UserCredits {
-  let { current_credits, last_credit_award_time, daily_credit_reset_time } = userRow;
+  let {
+    current_credits,
+    last_credit_award_time,
+    daily_credit_reset_time,
+    daily_recovered_credits,
+  } = userRow;
+
   const now = new Date();
 
-  // --- Midnight reset (back to 4 credits) ---
+  // --- Midnight reset ---
   const lastReset = new Date(daily_credit_reset_time);
   const todayMidnight = new Date();
   todayMidnight.setHours(0, 0, 0, 0);
@@ -72,21 +80,36 @@ function recoverCredits(userRow: UserCredits): UserCredits {
   if (lastReset < todayMidnight) {
     current_credits = 4;
     daily_credit_reset_time = now.toISOString();
+    daily_recovered_credits = 0; // reset daily recovery tracker
   }
 
-  // --- Add 1 credit/hour (up to 8) ---
-  if (current_credits < 8) {
+  // --- Add 1 credit/hour (up to 4 recovered/day) ---
+  if (current_credits < 8 && daily_recovered_credits < 4) {
     const lastAward = new Date(last_credit_award_time);
-    const diffHours = Math.floor((now.getTime() - lastAward.getTime()) / (1000 * 60 * 60));
+    const diffHours = Math.floor(
+      (now.getTime() - lastAward.getTime()) / (1000 * 60 * 60)
+    );
 
     if (diffHours >= 1) {
-      const creditsToAdd = Math.min(diffHours, 8 - current_credits);
-      current_credits += creditsToAdd;
-      last_credit_award_time = now.toISOString();
+      const possibleToAdd = Math.min(diffHours, 8 - current_credits);
+      const remainingDaily = 4 - daily_recovered_credits;
+      const creditsToAdd = Math.min(possibleToAdd, remainingDaily);
+
+      if (creditsToAdd > 0) {
+        current_credits += creditsToAdd;
+        daily_recovered_credits += creditsToAdd;
+        last_credit_award_time = now.toISOString();
+      }
     }
   }
 
-  return { user_id: userRow.user_id, current_credits, last_credit_award_time, daily_credit_reset_time };
+  return {
+    user_id: userRow.user_id,
+    current_credits,
+    last_credit_award_time,
+    daily_credit_reset_time,
+    daily_recovered_credits,
+  };
 }
 
 // --- Handlers ---
@@ -128,6 +151,7 @@ async function handleResetCredits(userId: string): Promise<UserCredits> {
     current_credits: 4,
     daily_credit_reset_time: new Date().toISOString(),
     last_credit_award_time: new Date().toISOString(),
+    daily_recovered_credits: 0,
   };
 
   const { data, error } = await supabase
